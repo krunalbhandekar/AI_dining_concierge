@@ -1,4 +1,110 @@
+// const path = require("path");
+
+// const env = require("../../config/env");
+// const { readJson, writeJson } = require("../../utils/jsonStore");
+// const { loadDataset } = require("./loadDataset");
+// const { normalizeRestaurant } = require("./normalizeRestaurant");
+// const { updateProgress } = require("../../utils/jobManager");
+
+// const restaurantsFile = path.resolve(
+//   process.cwd(),
+//   env.DATA_DIR,
+//   "restaurants.json",
+// );
+// const ingestionLogFile = path.resolve(
+//   process.cwd(),
+//   env.DATA_DIR,
+//   "ingestion-log.json",
+// );
+
+// function createRestaurantKey(item) {
+//   const locality = item.locality || "";
+//   return `${item.name.toLowerCase()}|${item.city.toLowerCase()}|${locality.toLowerCase()}`;
+// }
+
+// async function ingestDataset() {
+//   const startedAt = new Date().toISOString();
+//   const datasetVersion = `${env.HF_DATASET}@${startedAt}`;
+//   const summary = {
+//     startedAt,
+//     sourceUrl: env.DATASET_URL,
+//     requested: env.INGEST_MAX_ROWS,
+//     processed: 0,
+//     inserted: 0,
+//     updated: 0,
+//     skipped: 0,
+//     failed: 0,
+//     datasetVersion,
+//   };
+
+//   const rawRecords = await loadDataset();
+
+//   const existing = (await readJson(restaurantsFile, [])) || [];
+//   const keyToIndex = new Map(
+//     existing.map((item, index) => [createRestaurantKey(item), index]),
+//   );
+
+//   for (const raw of rawRecords) {
+//     summary.processed += 1;
+//     try {
+//       const normalized = normalizeRestaurant(raw, datasetVersion);
+//       if (!normalized) {
+//         summary.skipped += 1;
+//         continue;
+//       }
+
+//       const key = createRestaurantKey(normalized);
+//       // if (keyToIndex.has(key)) {
+//       //   const existingIndex = keyToIndex.get(key);
+//       //   existing[existingIndex] = {
+//       //     ...existing[existingIndex],
+//       //     ...normalized,
+//       //     id: existing[existingIndex].id,
+//       //     created_at: existing[existingIndex].created_at,
+//       //   };
+//       //   summary.updated += 1;
+//       // } else {
+//       normalized.id = `res_${existing.length + 1}`;
+//       normalized.created_at = new Date().toISOString();
+//       existing.push(normalized);
+//       // keyToIndex.set(key, existing.length - 1);
+//       summary.inserted += 1;
+//       // }
+//     } catch (error) {
+//       summary.failed += 1;
+//     }
+
+//     // Update every 100 records (avoid too frequent updates)
+//     if (summary.processed % 100 === 0) {
+//       updateProgress({
+//         processed: summary.processed,
+//         inserted: summary.inserted,
+//         failed: summary.failed,
+//       });
+//     }
+//   }
+
+//   summary.completedAt = new Date().toISOString();
+//   await writeJson(restaurantsFile, existing);
+
+//   const previousLogs = (await readJson(ingestionLogFile, [])) || [];
+//   previousLogs.push(summary);
+//   await writeJson(ingestionLogFile, previousLogs);
+
+//   return {
+//     summary,
+//     totalRestaurants: existing.length,
+//     dataPath: restaurantsFile,
+//   };
+// }
+
+// module.exports = {
+//   ingestDataset,
+// };
+
+const fs = require("fs");
 const path = require("path");
+const { parse } = require("csv-parse");
 
 const env = require("../../config/env");
 const { readJson, writeJson } = require("../../utils/jsonStore");
@@ -17,85 +123,103 @@ const ingestionLogFile = path.resolve(
   "ingestion-log.json",
 );
 
+const inputFile = path.resolve(process.cwd(), env.DATASET_URL);
+const outputFile = path.resolve(
+  process.cwd(),
+  env.DATA_DIR,
+  "restaurants.ndjson",
+);
+
 function createRestaurantKey(item) {
   const locality = item.locality || "";
   return `${item.name.toLowerCase()}|${item.city.toLowerCase()}|${locality.toLowerCase()}`;
 }
 
 async function ingestDataset() {
-  const startedAt = new Date().toISOString();
-  const datasetVersion = `${env.HF_DATASET}@${startedAt}`;
-  const summary = {
-    startedAt,
-    sourceUrl: env.DATASET_URL,
-    requested: env.INGEST_MAX_ROWS,
-    processed: 0,
-    inserted: 0,
-    updated: 0,
-    skipped: 0,
-    failed: 0,
-    datasetVersion,
-  };
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true });
 
-  const rawRecords = await loadDataset();
+    // clear old file
+    if (fs.existsSync(outputFile)) {
+      fs.unlinkSync(outputFile);
+    }
 
-  const existing = (await readJson(restaurantsFile, [])) || [];
-  const keyToIndex = new Map(
-    existing.map((item, index) => [createRestaurantKey(item), index]),
-  );
+    const writeStream = fs.createWriteStream(outputFile, { flags: "a" });
 
-  for (const raw of rawRecords) {
-    summary.processed += 1;
-    try {
-      const normalized = normalizeRestaurant(raw, datasetVersion);
-      if (!normalized) {
-        summary.skipped += 1;
-        continue;
+    let processed = 0;
+    let inserted = 0;
+    let failed = 0;
+
+    const BATCH_SIZE = 500;
+    let batch = [];
+
+    const stream = fs.createReadStream(inputFile).pipe(
+      parse({
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+      }),
+    );
+
+    stream.on("data", async (row) => {
+      stream.pause(); // 🔥 prevent memory overflow
+
+      try {
+        processed++;
+
+        const normalized = normalizeRestaurant(row);
+
+        if (normalized) {
+          normalized.id = `res_${inserted + 1}`;
+          normalized.created_at = new Date().toISOString();
+
+          batch.push(normalized);
+          inserted++;
+        }
+
+        // write batch
+        if (batch.length >= BATCH_SIZE) {
+          for (const item of batch) {
+            writeStream.write(JSON.stringify(item) + "\n");
+          }
+          batch = [];
+        }
+
+        // update progress
+        if (processed % 200 === 0) {
+          updateProgress({ processed, inserted, failed });
+        }
+
+        // small delay to avoid CPU spike
+        if (processed % 1000 === 0) {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      } catch (err) {
+        failed++;
       }
 
-      const key = createRestaurantKey(normalized);
-      // if (keyToIndex.has(key)) {
-      //   const existingIndex = keyToIndex.get(key);
-      //   existing[existingIndex] = {
-      //     ...existing[existingIndex],
-      //     ...normalized,
-      //     id: existing[existingIndex].id,
-      //     created_at: existing[existingIndex].created_at,
-      //   };
-      //   summary.updated += 1;
-      // } else {
-      normalized.id = `res_${existing.length + 1}`;
-      normalized.created_at = new Date().toISOString();
-      existing.push(normalized);
-      // keyToIndex.set(key, existing.length - 1);
-      summary.inserted += 1;
-      // }
-    } catch (error) {
-      summary.failed += 1;
-    }
+      stream.resume();
+    });
 
-    // Update every 100 records (avoid too frequent updates)
-    if (summary.processed % 100 === 0) {
-      updateProgress({
-        processed: summary.processed,
-        inserted: summary.inserted,
-        failed: summary.failed,
+    stream.on("end", async () => {
+      if (batch.length) {
+        for (const item of batch) {
+          writeStream.write(JSON.stringify(item) + "\n");
+        }
+      }
+
+      writeStream.end();
+
+      resolve({
+        processed,
+        inserted,
+        failed,
+        file: outputFile,
       });
-    }
-  }
+    });
 
-  summary.completedAt = new Date().toISOString();
-  await writeJson(restaurantsFile, existing);
-
-  const previousLogs = (await readJson(ingestionLogFile, [])) || [];
-  previousLogs.push(summary);
-  await writeJson(ingestionLogFile, previousLogs);
-
-  return {
-    summary,
-    totalRestaurants: existing.length,
-    dataPath: restaurantsFile,
-  };
+    stream.on("error", reject);
+  });
 }
 
 module.exports = {
