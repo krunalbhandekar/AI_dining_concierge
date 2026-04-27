@@ -1,0 +1,27 @@
+[
+  {
+    "name": "Spice Garden",
+    "city": "Bengaluru",
+    "locality": "Indiranagar",
+    "cuisines": "North Indian, Chinese",
+    "average_cost_for_two": "1200",
+    "rating": "4.2",
+    "votes": "845"
+  },
+  {
+    "name": "Pasta Junction",
+    "city": "Bangalore",
+    "locality": "Koramangala",
+    "cuisines": "Italian",
+    "average_cost_for_two": "900",
+    "rating": "4.0",
+    "votes": "420"
+  },
+  {
+    "name": "",
+    "city": "Delhi",
+    "cuisines": "South Indian",
+    "average_cost_for_two": "500",
+    "rating": "3.9"
+  }
+]
